@@ -1529,6 +1529,124 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
 }
 
 
+// ── Excel schedule parser ─────────────────────────────────────────────────────
+// Loads SheetJS from CDN and parses SUPA schedule Excel files
+// Returns array of chukka objects for Conroy teams only
+
+function loadSheetJS() {
+  return new Promise((resolve, reject) => {
+    if (window.XLSX) { resolve(window.XLSX); return; }
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.onload = () => resolve(window.XLSX);
+    script.onerror = () => reject(new Error("Failed to load SheetJS"));
+    document.head.appendChild(script);
+  });
+}
+
+function decToTime(d) {
+  try {
+    const mins = Math.round(parseFloat(d) * 24 * 60);
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`;
+  } catch { return "00:00"; }
+}
+
+function divMap(divStr) {
+  const d = (divStr || "").toLowerCase();
+  if (d.includes("upper beginner")) return "Upper Beginner";
+  if (d.includes("lower beginner")) return "Lower Beginner";
+  if (d.includes("median")) return "Median";
+  if (d.includes("upper novice combined")) return "Upper Novice Combined";
+  if (d.includes("lower novice combined")) return "Lower Novice Combined";
+  if (d.includes("upper novice")) return "Upper Novice";
+  if (d.includes("lower novice")) return "Lower Novice";
+  if (d.includes("upper inters")) return "Upper Inters";
+  if (d.includes("lower inters")) return "Lower Inters";
+  return divStr || "Beginner";
+}
+
+function appDiv(divStr) {
+  const d = (divStr || "").toLowerCase();
+  if (d.includes("beginner")) return "Beginner";
+  if (d.includes("median")) return "Median";
+  return "Novice";
+}
+
+async function parseScheduleExcel(file, conroyTeams) {
+  const XLSX = await loadSheetJS();
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: "array" });
+
+  const teamNames = conroyTeams.map(t => t.name.toLowerCase());
+  const results = [];
+
+  for (const sheetName of workbook.SheetNames) {
+    if (!sheetName.toLowerCase().includes("times")) continue;
+
+    // Determine pitch from sheet name
+    const pitch = sheetName.toLowerCase().includes("pitch 2") ? 2 : 1;
+
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+
+    // Find header row
+    let headerRow = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].some(cell => String(cell).trim() === "Chu" || String(cell).trim() === "Chukka")) {
+        headerRow = i;
+        break;
+      }
+    }
+    if (headerRow === -1) continue;
+
+    // Parse data rows
+    for (let i = headerRow + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const chu = row[1];
+      const divRaw = String(row[2] || "");
+      const matchLetter = String(row[4] || "").toLowerCase().trim();
+      const teamA = String(row[5] || "").trim();
+      const teamB = String(row[13] || row[6] || "").trim();
+      const timeVal = row[0];
+
+      if (!chu || isNaN(parseFloat(chu))) continue;
+      if (!teamA || teamA === "PLEASE BE AWARE") continue;
+
+      const chukkaNum = parseInt(parseFloat(chu));
+      const time = typeof timeVal === "number" ? decToTime(timeVal) : String(timeVal || "");
+      const division = divMap(divRaw);
+
+      // Check if either team is a Conroy team
+      for (const team of conroyTeams) {
+        const tl = team.name.toLowerCase();
+        if (teamA.toLowerCase() === tl || teamB.toLowerCase() === tl) {
+          results.push({
+            id: uid(),
+            chukkaNum: String(chukkaNum),
+            time,
+            division,
+            appDivision: appDiv(division),
+            pitch,
+            matchLetter,
+            teamId: team.id,
+            playerIds: team.players.map(p => p.id),
+            teamA,
+            teamB,
+            branch: "confirmed",
+            isConditional: false,
+            fromExcel: true,
+          });
+          break;
+        }
+      }
+    }
+  }
+
+  return results.sort((a, b) => (parseInt(a.chukkaNum) || 0) - (parseInt(b.chukkaNum) || 0));
+}
+
 // ── Schedule Tab ──────────────────────────────────────────────────────────────
 function ScheduleTab({ day, event, onUpdateDay }) {
   const { teams } = event;
@@ -1539,6 +1657,9 @@ function ScheduleTab({ day, event, onUpdateDay }) {
   const [selectedTeam, setSelectedTeam] = useState("");
   const [selectedPlayers, setSelectedPlayers] = useState([]);
   const [branch, setBranch] = useState("confirmed");
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null); // { success, count, warnings }
+  const fileInputRef = useRef(null);
 
   const team = teams.find(t => t.id === selectedTeam);
 
@@ -1552,20 +1673,100 @@ function ScheduleTab({ day, event, onUpdateDay }) {
     setTime(""); setChukkaNum(""); setSelectedPlayers([]);
   }
 
+  async function handleExcelUpload(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    setUploadStatus(null);
+
+    try {
+      const parsed = await parseScheduleExcel(file, teams);
+
+      if (parsed.length === 0) {
+        setUploadStatus({ success: false, error: "No chukkas found for your teams in this file. Check the sheet names contain 'Times'." });
+        setUploading(false);
+        return;
+      }
+
+      // Replace Excel-sourced chukkas, keep manual ones and preserve locks/results
+      const manualChukkas = schedule.filter(c => !c.fromExcel);
+      const newSchedule = [...manualChukkas, ...parsed];
+
+      onUpdateDay({ ...day, schedule: newSchedule });
+      setUploadStatus({ success: true, count: parsed.length });
+    } catch (err) {
+      setUploadStatus({ success: false, error: "Failed to parse file: " + err.message });
+    }
+
+    setUploading(false);
+    // Reset file input so same file can be re-uploaded
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
   const bracketCount = SUMMER_2026_RAW[day.name]
     ? findConroyChukkas(day.name, teams, day.results || {}).length
     : 0;
 
+  const excelChukkas = schedule.filter(c => c.fromExcel);
+  const manualChukkas = schedule.filter(c => !c.fromExcel);
   const sorted = [...schedule].sort((a, b) => (parseInt(a.chukkaNum) || 0) - (parseInt(b.chukkaNum) || 0));
 
   return (
     <div>
+      {/* Excel upload — primary workflow */}
+      <Card style={{ marginBottom: 16, background: "#0a0f1e", borderColor: "#334155" }}>
+        <p style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 14, margin: "0 0 4px" }}>📊 Upload updated schedule</p>
+        <p style={{ color: "#475569", fontSize: 12, margin: "0 0 12px" }}>
+          Upload the latest SUPA Excel sheet. Replaces previous Excel data, keeps your manual additions and all locks.
+        </p>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xlsx,.xls"
+          onChange={handleExcelUpload}
+          style={{ display: "none" }}
+          id="excel-upload"
+        />
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          style={{
+            width: "100%", background: uploading ? "#1e293b" : "#1d4ed8",
+            border: "1px solid " + (uploading ? "#334155" : "#1d4ed8"),
+            borderRadius: 8, color: uploading ? "#475569" : "#fff",
+            padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: uploading ? "not-allowed" : "pointer",
+          }}>
+          {uploading ? "Parsing..." : "Select Excel file"}
+        </button>
+
+        {uploadStatus?.success && (
+          <div style={{ marginTop: 10, background: "#14532d", border: "1px solid #16a34a", borderRadius: 6, padding: "8px 12px" }}>
+            <p style={{ color: "#4ade80", fontWeight: 700, fontSize: 13, margin: 0 }}>
+              ✓ Imported {uploadStatus.count} chukka{uploadStatus.count !== 1 ? "s" : ""} for your teams
+            </p>
+          </div>
+        )}
+        {uploadStatus?.error && (
+          <div style={{ marginTop: 10, background: "#450a0a", border: "1px solid #dc2626", borderRadius: 6, padding: "8px 12px" }}>
+            <p style={{ color: "#f87171", fontSize: 13, margin: 0 }}>{uploadStatus.error}</p>
+          </div>
+        )}
+
+        {excelChukkas.length > 0 && !uploadStatus && (
+          <p style={{ color: "#475569", fontSize: 12, margin: "10px 0 0" }}>
+            {excelChukkas.length} chukka{excelChukkas.length !== 1 ? "s" : ""} from last upload
+          </p>
+        )}
+      </Card>
+
       {bracketCount > 0 && (
         <Card style={{ marginBottom: 16, background: "#0a0f1e", borderColor: "#1e293b" }}>
-          <p style={{ color: "#4ade80", fontSize: 13, fontWeight: 700, margin: "0 0 4px" }}>✓ {bracketCount} chukkas tracked automatically</p>
-          <p style={{ color: "#475569", fontSize: 12, margin: 0 }}>Confirmed and conditional chukkas shown in Day View. Add anything missing below.</p>
+          <p style={{ color: "#4ade80", fontSize: 13, fontWeight: 700, margin: "0 0 4px" }}>✓ {bracketCount} chukkas tracked from hardcoded schedule</p>
+          <p style={{ color: "#475569", fontSize: 12, margin: 0 }}>Upload an updated Excel to override these with the latest data.</p>
         </Card>
       )}
+
+      {/* Manual add */}
       <Card style={{ marginBottom: 16 }}>
         <p style={{ color: "#64748b", fontSize: 11, margin: "0 0 10px", textTransform: "uppercase", letterSpacing: 1 }}>Add chukka manually</p>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
