@@ -799,69 +799,6 @@ const JUNE_2026_TEAMS = [
   ]},
 ];
 
-// ── UI Primitives ─────────────────────────────────────────────────────────────
-function Badge({ children, color = "#94a3b8" }) {
-  return (
-    <span style={{
-      background: color + "22", color, border: "1px solid " + color + "44",
-      borderRadius: 4, padding: "2px 8px", fontSize: 11, fontWeight: 700,
-      letterSpacing: 1, textTransform: "uppercase",
-    }}>{children}</span>
-  );
-}
-
-function Btn({ children, onClick, variant = "primary", small, danger, disabled, full, style }) {
-  const bg = danger ? "#dc2626" : variant === "primary" ? "#16a34a" : "#1e293b";
-  const border = danger ? "#dc2626" : variant === "primary" ? "#16a34a" : "#334155";
-  return (
-    <button
-      onClick={e => { e.stopPropagation(); onClick && onClick(e); }}
-      disabled={disabled}
-      style={{
-        background: disabled ? "#1e293b" : bg, color: disabled ? "#475569" : "#fff",
-        border: "1px solid " + (disabled ? "#334155" : border),
-        borderRadius: 6, padding: small ? "4px 10px" : "8px 16px",
-        fontSize: small ? 12 : 14, fontWeight: 600,
-        cursor: disabled ? "not-allowed" : "pointer",
-        whiteSpace: "nowrap", width: full ? "100%" : "auto", ...style,
-      }}>{children}</button>
-  );
-}
-
-function Input({ value, onChange, placeholder, type = "text", style }) {
-  return (
-    <input type={type} value={value} onChange={e => onChange(e.target.value)}
-      placeholder={placeholder} style={{
-        background: "#0f172a", border: "1px solid #334155", borderRadius: 6,
-        color: "#f1f5f9", padding: "8px 12px", fontSize: 14, outline: "none",
-        width: "100%", boxSizing: "border-box", ...style,
-      }} />
-  );
-}
-
-function Select({ value, onChange, children, style }) {
-  return (
-    <select value={value} onChange={e => onChange(e.target.value)} style={{
-      background: "#0f172a", border: "1px solid #334155", borderRadius: 6,
-      color: "#f1f5f9", padding: "8px 12px", fontSize: 14, outline: "none", width: "100%", ...style,
-    }}>{children}</select>
-  );
-}
-
-function Card({ children, style }) {
-  return (
-    <div style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 10, padding: 16, ...style }}>
-      {children}
-    </div>
-  );
-}
-
-function branchStyle(branch) {
-  if (branch === "win")  return { border: "#16a34a", bg: "#14532d", label: "WIN PATH" };
-  if (branch === "loss") return { border: "#dc2626", bg: "#450a0a", label: "LOSS PATH" };
-  return { border: "#334155", bg: "#1e293b", label: null };
-}
-
 // ── Welfare rules editor ──────────────────────────────────────────────────────
 function WelfareRulesEditor({ welfareRules, onChange }) {
   return (
@@ -917,49 +854,6 @@ function DeleteButton({ label, onDelete }) {
 
 
 // ── Roster Manager ────────────────────────────────────────────────────────────
-function RosterManager({ roster, onChange }) {
-  const [name, setName] = useState("");
-  const [max, setMax] = useState("4");
-  function add() {
-    if (!name.trim()) return;
-    onChange([...roster, { id: uid(), name: name.trim(), maxChukkas: parseInt(max) || 4 }]);
-    setName(""); setMax("4");
-  }
-  return (
-    <div>
-      <h2 style={{ color: "#f1f5f9", fontSize: 18, margin: "0 0 4px" }}>Pony Roster</h2>
-      <p style={{ color: "#475569", fontSize: 12, margin: "0 0 16px" }}>Your full string — select attending ponies per event</p>
-      <Card style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <Input value={name} onChange={setName} placeholder="Pony name" style={{ flex: 2, minWidth: 120 }} />
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ color: "#64748b", fontSize: 12 }}>Max</span>
-            <select value={max} onChange={e => setMax(e.target.value)} style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 4, color: "#f1f5f9", padding: "8px", fontSize: 13 }}>
-              {[1,2,3,4,5].map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </div>
-          <Btn onClick={add}>Add</Btn>
-        </div>
-      </Card>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {roster.map(h => (
-          <Card key={h.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 16px" }}>
-            <span style={{ flex: 1, color: "#f1f5f9", fontWeight: 600, fontSize: 15 }}>{h.name}</span>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ color: "#64748b", fontSize: 12 }}>Max</span>
-              <select value={h.maxChukkas} onChange={e => onChange(roster.map(x => x.id === h.id ? { ...x, maxChukkas: parseInt(e.target.value) } : x))}
-                style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 4, color: "#f1f5f9", padding: "4px 8px", fontSize: 13 }}>
-                {[1,2,3,4,5].map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </div>
-            <Btn small danger onClick={() => onChange(roster.filter(x => x.id !== h.id))}>✕</Btn>
-          </Card>
-        ))}
-        {roster.length === 0 && <p style={{ color: "#475569", textAlign: "center", fontSize: 14 }}>No ponies in roster yet</p>}
-      </div>
-    </div>
-  );
-}
 
 // ── New Event Wizard ──────────────────────────────────────────────────────────
 function NewEventWizard({ roster, onSave, onCancel }) {
