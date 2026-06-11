@@ -1259,12 +1259,18 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
   const [horseModal, setHorseModal] = useState(null);
   const [pickerState, setPickerState] = useState(null);
   const [searchName, setSearchName] = useState("");
-  const [recalcKey, setRecalcKey] = useState(0);
+  const [showSaved, setShowSaved] = useState(false);
+
+  // Solution history — array of { assignments, conflicts, savedAt? }
+  // Current position in history
+  const [history, setHistory] = useState([]);
+  const [historyIdx, setHistoryIdx] = useState(-1);
+  const [savedSolutions, setSavedSolutions] = useState([]); // array of { assignments, conflicts, label }
 
   const teamWins = getTeamWins(teams, allDayResults);
   const locks = day.locks || {};
 
-  // Build chukkas from bracket + manual
+  // Build allocatable chukkas
   const bracketChukkas = SUMMER_2026_RAW[day.name]
     ? findConroyChukkas(day.name, teams, day.results || {})
     : [];
@@ -1278,8 +1284,30 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
   }
   const allocatable = bracketToAllocatable(allConroyChukkas);
 
-  // recalcKey increments on each tap — engine uses Math.random() so produces different result
-  const { assignments, conflicts } = runAllocation(allocatable, teams, horses, welfareRules, teamWins, locks, recalcKey);
+  // Generate a new solution and add to history
+  function generateSolution() {
+    const result = runAllocation(allocatable, teams, horses, welfareRules, teamWins, locks, Date.now());
+    const newHistory = [...history.slice(0, historyIdx + 1), result];
+    setHistory(newHistory);
+    setHistoryIdx(newHistory.length - 1);
+  }
+
+  // Initialise with first solution if history is empty
+  const currentSolution = historyIdx >= 0 && history[historyIdx]
+    ? history[historyIdx]
+    : (() => {
+        const result = runAllocation(allocatable, teams, horses, welfareRules, teamWins, locks, 0);
+        if (history.length === 0) {
+          // Defer state update to avoid render loop
+          setTimeout(() => {
+            setHistory([result]);
+            setHistoryIdx(0);
+          }, 0);
+        }
+        return result;
+      })();
+
+  const { assignments, conflicts } = currentSolution;
 
   const sorted = [...allocatable].sort((a, b) => (parseInt(a.chukkaNum) || 0) - (parseInt(b.chukkaNum) || 0));
   const searchLower = searchName.toLowerCase().trim();
@@ -1354,23 +1382,124 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
         />
       )}
 
-      {/* Header controls */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        <div style={{ flex: 1, position: "relative", minWidth: 160 }}>
-          <input value={searchName} onChange={e => setSearchName(e.target.value)} placeholder="Search player, team, horse..."
-            style={{ width: "100%", boxSizing: "border-box", background: "#1e293b", border: "1px solid #334155", borderRadius: 8, color: "#f1f5f9", padding: "8px 12px", fontSize: 13, outline: "none" }} />
-          {searchName && <button onClick={() => setSearchName("")} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#475569", fontSize: 16, cursor: "pointer" }}>✕</button>}
-        </div>
-        <button onClick={() => setRecalcKey(k => k + 1)} style={{
-          background: "#1e293b", border: "1px solid #3b82f6", borderRadius: 8,
-          color: "#93c5fd", padding: "8px 12px", fontSize: 12, fontWeight: 700,
-          cursor: "pointer", whiteSpace: "nowrap",
-        }}>↺ Recalculate</button>
-        {lockCount > 0 && (
-          <button onClick={resetAllLocks} style={{ background: "#422006", border: "1px solid #d97706", borderRadius: 8, color: "#fbbf24", padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
-            🔓 Clear {lockCount} lock{lockCount !== 1 ? "s" : ""}
+      {/* Solution history navigation */}
+      <div style={{ background: "#0a0f1e", border: "1px solid #1e293b", borderRadius: 10, padding: "10px 14px", marginBottom: 12 }}>
+        {/* Nav row */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <button onClick={() => historyIdx > 0 && setHistoryIdx(historyIdx - 1)}
+            disabled={historyIdx <= 0}
+            style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, color: historyIdx > 0 ? "#f1f5f9" : "#334155", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: historyIdx > 0 ? "pointer" : "not-allowed" }}>
+            ← Prev
           </button>
-        )}
+          <span style={{ color: "#64748b", fontSize: 12, flex: 1, textAlign: "center" }}>
+            Solution {historyIdx + 1} of {history.length}
+            {conflicts.length === 0
+              ? <span style={{ color: "#4ade80", marginLeft: 6 }}>✓ Complete</span>
+              : <span style={{ color: "#f87171", marginLeft: 6 }}>⚠ {conflicts.length} conflict{conflicts.length !== 1 ? "s" : ""}</span>
+            }
+          </span>
+          <button onClick={generateSolution}
+            style={{ background: "#1e293b", border: "1px solid #3b82f6", borderRadius: 6, color: "#93c5fd", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+            Next →
+          </button>
+        </div>
+
+        {/* Action row */}
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => {
+            const label = `Solution ${history.length} — ${conflicts.length === 0 ? "complete" : conflicts.length + " conflicts"}`;
+            setSavedSolutions(prev => [...prev, { ...currentSolution, label, id: uid() }]);
+          }} style={{ flex: 1, background: "#14532d", border: "1px solid #16a34a", borderRadius: 6, color: "#4ade80", padding: "6px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            ★ Save this
+          </button>
+          {savedSolutions.length > 0 && (
+            <button onClick={() => setShowSaved(true)}
+              style={{ flex: 1, background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 6, color: "#93c5fd", padding: "6px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              Saved ({savedSolutions.length})
+            </button>
+          )}
+          {lockCount > 0 && (
+            <button onClick={resetAllLocks}
+              style={{ background: "#422006", border: "1px solid #d97706", borderRadius: 6, color: "#fbbf24", padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+              🔓 {lockCount}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Saved solutions modal */}
+      {showSaved && (
+        <div style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1000, display: "flex", alignItems: "flex-end" }}
+          onClick={() => setShowSaved(false)}>
+          <div style={{ background: "#0f172a", borderRadius: "16px 16px 0 0", width: "100%", maxHeight: "80vh", overflow: "auto", padding: 20 }}
+            onClick={e => e.stopPropagation()}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <h3 style={{ color: "#f1f5f9", fontSize: 18, margin: 0 }}>Saved Solutions</h3>
+              <button onClick={() => setShowSaved(false)} style={{ background: "none", border: "none", color: "#475569", fontSize: 24, cursor: "pointer" }}>✕</button>
+            </div>
+            {savedSolutions.length === 0 ? (
+              <p style={{ color: "#475569", textAlign: "center", padding: "20px 0" }}>No saved solutions yet</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {savedSolutions.map((sol, i) => {
+                  const conflictCount = sol.conflicts?.length || 0;
+                  return (
+                    <div key={sol.id} style={{ background: "#1e293b", border: "1px solid " + (conflictCount === 0 ? "#16a34a" : "#dc2626"), borderRadius: 10, padding: 14 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                        <span style={{ color: "#f1f5f9", fontWeight: 700, flex: 1 }}>★ Saved #{i + 1}</span>
+                        <span style={{ color: conflictCount === 0 ? "#4ade80" : "#f87171", fontSize: 12, fontWeight: 700 }}>
+                          {conflictCount === 0 ? "✓ Complete" : `⚠ ${conflictCount} conflict${conflictCount !== 1 ? "s" : ""}`}
+                        </span>
+                      </div>
+                      {/* Compact assignment summary */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 12 }}>
+                        {allocatable.filter(c => c.branch === "confirmed").slice(0, 3).map(chukka => {
+                          const team = teams.find(t => t.id === chukka.teamId);
+                          const playerSummary = (chukka.playerIds || []).map(pid => {
+                            const player = team?.players.find(p => p.id === pid);
+                            const a = sol.assignments[chukka.id]?.[pid];
+                            const horse = a?.horseId ? horses.find(h => h.id === a.horseId) : null;
+                            return `${player?.name?.split(" ")[0]} → ${horse?.name || "?"}`;
+                          }).join(", ");
+                          return (
+                            <p key={chukka.id} style={{ color: "#64748b", fontSize: 11, margin: 0 }}>
+                              <span style={{ color: "#94a3b8" }}>Ch{chukka.chukkaNum} {team?.name?.split(" ").pop()}</span> · {playerSummary}
+                            </p>
+                          );
+                        })}
+                        {allocatable.filter(c => c.branch === "confirmed").length > 3 && (
+                          <p style={{ color: "#475569", fontSize: 11, margin: 0 }}>+ {allocatable.filter(c => c.branch === "confirmed").length - 3} more chukkas...</p>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={() => {
+                          // Apply this solution by adding it to history and navigating to it
+                          const newHistory = [...history, sol];
+                          setHistory(newHistory);
+                          setHistoryIdx(newHistory.length - 1);
+                          setShowSaved(false);
+                        }} style={{ flex: 1, background: "#16a34a", border: "none", borderRadius: 6, color: "#fff", padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                          Apply
+                        </button>
+                        <button onClick={() => setSavedSolutions(prev => prev.filter(s => s.id !== sol.id))}
+                          style={{ background: "#1e293b", border: "1px solid #dc2626", borderRadius: 6, color: "#f87171", padding: "10px 14px", fontSize: 13, cursor: "pointer" }}>
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Search */}
+      <div style={{ position: "relative", marginBottom: 12 }}>
+        <input value={searchName} onChange={e => setSearchName(e.target.value)} placeholder="Search player, team, horse..."
+          style={{ width: "100%", boxSizing: "border-box", background: "#1e293b", border: "1px solid #334155", borderRadius: 8, color: "#f1f5f9", padding: "8px 12px", fontSize: 13, outline: "none" }} />
+        {searchName && <button onClick={() => setSearchName("")} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "#475569", fontSize: 16, cursor: "pointer" }}>✕</button>}
       </div>
 
       {/* Conflicts */}
