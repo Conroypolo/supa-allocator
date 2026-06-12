@@ -1213,55 +1213,73 @@ function analyseSchedulePressure(allChukkas, assignments, horses, conflicts) {
   const available = horses.filter(h => h.unavailable !== true);
   const pressureAlerts = [];
 
-  // For each chukka with conflicts, check if previous chukka(s) used too many horses
   const conflictedChukkaIds = new Set(conflicts.map(c => c.chukkaId));
   const sorted = [...allChukkas].sort((a, b) => (parseInt(a.chukkaNum) || 0) - (parseInt(b.chukkaNum) || 0));
 
+  // Group all chukkas by chukka number — multiple teams can share a number
+  const byNum = {};
+  for (const c of sorted) {
+    const n = parseInt(c.chukkaNum) || 0;
+    if (!byNum[n]) byNum[n] = [];
+    byNum[n].push(c);
+  }
+
+  // For each conflicted chukka, check if adjacent chukka numbers used too many horses
+  const checkedNums = new Set();
   for (const chukka of sorted) {
     if (!conflictedChukkaIds.has(chukka.id)) continue;
-
     const thisNum = parseInt(chukka.chukkaNum) || 0;
+    if (checkedNums.has(thisNum)) continue;
+    checkedNums.add(thisNum);
 
-    // Find chukkas within 1 chukka gap (back-to-back)
-    const adjacent = sorted.filter(c => {
-      const n = parseInt(c.chukkaNum) || 0;
-      return c.id !== chukka.id && Math.abs(n - thisNum) === 1;
-    });
+    // Collect ALL chukkas at adjacent numbers (±1) — could be multiple teams
+    const adjacentNums = [thisNum - 1, thisNum + 1].filter(n => byNum[n]);
+    if (adjacentNums.length === 0) continue;
 
-    if (adjacent.length === 0) continue;
+    const adjacentChukkas = adjacentNums.flatMap(n => byNum[n]);
 
-    // Count horses used in adjacent chukkas that are now on rest
+    // All horses used across all adjacent chukkas are on rest
     const horsesOnRest = new Set();
-    for (const adj of adjacent) {
+    for (const adj of adjacentChukkas) {
       for (const playerId of (adj.playerIds || [])) {
         const a = assignments[adj.id]?.[playerId];
         if (a?.horseId) horsesOnRest.add(a.horseId);
       }
     }
 
-    // Count horses available for this chukka (not on rest, not at max)
-    const horsesNeeded = (chukka.playerIds || []).filter(pid => {
-      const a = assignments[chukka.id]?.[pid];
-      return !a?.horseId; // unassigned players
-    }).length;
+    if (horsesOnRest.size === 0) continue;
+
+    // How many players at THIS chukka number still need a horse
+    const allAtThisNum = byNum[thisNum] || [];
+    const horsesNeeded = allAtThisNum.reduce((n, c) => {
+      return n + (c.playerIds || []).filter(pid => !assignments[c.id]?.[pid]?.horseId).length;
+    }, 0);
 
     const horsesAvailable = available.filter(h => !horsesOnRest.has(h.id)).length;
 
-    if (horsesOnRest.size > 0 && horsesAvailable < horsesNeeded) {
-      const adjNums = adjacent.map(c => c.chukkaNum).join(", ");
+    if (horsesAvailable < horsesNeeded) {
+      // Build description of which adjacent chukkas caused pressure
+      const adjDesc = adjacentNums.map(n => {
+        const teams = byNum[n].map(c => {
+          const team = allChukkas.find(x => x.id === c.id);
+          return `chukka ${n}`;
+        });
+        return `chukka ${n} (${byNum[n].length} team${byNum[n].length > 1 ? "s" : ""})`;
+      }).join(" and ");
+
       pressureAlerts.push({
-        chukkaNum: chukka.chukkaNum,
+        chukkaNum: String(thisNum),
         horsesOnRest: horsesOnRest.size,
         horsesAvailable,
         horsesNeeded,
-        adjacentChukkas: adjNums,
+        adjacentDesc: adjDesc,
         shortfall: horsesNeeded - horsesAvailable,
+        multipleTeamsAdjacent: adjacentChukkas.length > adjacentNums.length,
       });
     }
   }
 
-  // Deduplicate by chukkaNum
-  return pressureAlerts.filter((a, i, arr) => arr.findIndex(x => x.chukkaNum === a.chukkaNum) === i);
+  return pressureAlerts;
 }
 
 // ── Conflict panel ────────────────────────────────────────────────────────────
@@ -1286,13 +1304,13 @@ function ConflictPanel({ conflicts, horses, allChukkas, assignments }) {
               📅 Schedule pressure — Chukka {alert.chukkaNum}
             </p>
             <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 2px" }}>
-              Chukka{alert.adjacentChukkas.includes(",") ? "s" : ""} {alert.adjacentChukkas} ran immediately before — {alert.horsesOnRest} horse{alert.horsesOnRest !== 1 ? "s" : ""} on mandatory rest.
+              {alert.adjacentDesc} ran immediately before/after — {alert.horsesOnRest} horse{alert.horsesOnRest !== 1 ? "s" : ""} on mandatory rest.
             </p>
             <p style={{ color: "#fbbf24", fontSize: 12, margin: "0 0 2px" }}>
               {alert.horsesAvailable} horse{alert.horsesAvailable !== 1 ? "s" : ""} available, {alert.horsesNeeded} needed — shortfall of {alert.shortfall}.
             </p>
             <p style={{ color: "#64748b", fontSize: 11, margin: "4px 0 0" }}>
-              Fix: move chukka {alert.chukkaNum} further from chukka{alert.adjacentChukkas.includes(",") ? "s" : ""} {alert.adjacentChukkas}, authorise a 5th chukka, or add a horse.
+              Fix: move chukka {alert.chukkaNum} further in the schedule, authorise a 5th chukka, or mark a horse available.
             </p>
           </div>
         ))}
@@ -2106,81 +2124,151 @@ function ScheduleTab({ day, event, onUpdateDay }) {
 }
 
 function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
-  const [editingId, setEditingId] = useState(null);
-  const [editTime, setEditTime] = useState("");
+  const [selectedChukka, setSelectedChukka] = useState(null);
+  const [pendingTime, setPendingTime] = useState("");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const sorted = [...chukkas].sort((a, b) => (parseInt(a.chukkaNum) || 0) - (parseInt(b.chukkaNum) || 0));
 
-  function saveTimeOverride(chukka) {
-    if (chukka.source === "manual" || chukka.source === "excel") {
-      // Update directly in schedule
-      onUpdateDay({ ...day, schedule: schedule.map(c => c.id === chukka.id ? { ...c, time: editTime } : c) });
-    } else {
-      // Store override for bracket chukkas
-      const overrides = { ...(day.timeOverrides || {}), [chukka.id.replace("bracket-", "")]: editTime };
-      onUpdateDay({ ...day, timeOverrides: overrides });
-    }
-    setEditingId(null);
+  function openChukka(c) {
+    setSelectedChukka(c);
+    setPendingTime(c.timeOverride || c.time || "");
+    setConfirmingDelete(false);
   }
 
-  function deleteChukka(chukka) {
-    if (chukka.source === "manual" || chukka.source === "excel") {
-      onUpdateDay({ ...day, schedule: schedule.filter(c => c.id !== chukka.id) });
+  function saveTime() {
+    if (!selectedChukka || !pendingTime) return;
+    if (selectedChukka.source === "manual" || selectedChukka.source === "excel") {
+      onUpdateDay({ ...day, schedule: schedule.map(c => c.id === selectedChukka.id ? { ...c, time: pendingTime } : c) });
+    } else {
+      const key = selectedChukka.id.replace("bracket-", "");
+      onUpdateDay({ ...day, timeOverrides: { ...(day.timeOverrides || {}), [key]: pendingTime } });
     }
-    // Bracket chukkas can't be deleted — only time-overridden
+    setSelectedChukka(null);
+  }
+
+  function resetTime() {
+    const key = selectedChukka.id.replace("bracket-", "");
+    const overrides = { ...(day.timeOverrides || {}) };
+    delete overrides[key];
+    onUpdateDay({ ...day, timeOverrides: overrides });
+    setSelectedChukka(null);
+  }
+
+  function deleteChukka() {
+    if (selectedChukka.source === "manual" || selectedChukka.source === "excel") {
+      onUpdateDay({ ...day, schedule: schedule.filter(c => c.id !== selectedChukka.id) });
+    }
+    setSelectedChukka(null);
+    setConfirmingDelete(false);
   }
 
   const sourceLabel = { bracket: "AUTO", excel: "EXCEL", manual: "MANUAL" };
   const sourceColor = { bracket: "#475569", excel: "#3b82f6", manual: "#a855f7" };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <p style={{ color: "#64748b", fontSize: 11, margin: "0 0 4px", textTransform: "uppercase", letterSpacing: 1 }}>
-        All tracked chukkas — tap time to edit
+    <div>
+      <p style={{ color: "#64748b", fontSize: 11, margin: "0 0 8px", textTransform: "uppercase", letterSpacing: 1 }}>
+        All tracked chukkas — tap to edit
       </p>
-      {sorted.map(c => {
-        const bs = branchStyle(c.branch || "confirmed");
-        const displayTime = c.timeOverride || c.time;
-        const isEditing = editingId === c.id;
-        const canDelete = c.source !== "bracket";
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {sorted.map(c => {
+          const bs = branchStyle(c.branch || "confirmed");
+          const displayTime = c.timeOverride || c.time;
+          return (
+            <button key={c.id} onClick={() => openChukka(c)} style={{
+              background: bs.bg, border: "1px solid " + bs.border,
+              borderRadius: 8, padding: "10px 14px", cursor: "pointer",
+              display: "flex", alignItems: "center", gap: 8, textAlign: "left", width: "100%",
+            }}>
+              <span style={{ color: "#f1f5f9", fontWeight: 700, minWidth: 28, fontSize: 14 }}>{c.chukkaNum}</span>
+              <span style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 4, color: c.timeOverride ? "#fbbf24" : "#64748b", padding: "2px 7px", fontSize: 11 }}>
+                {displayTime || "—"}{c.timeOverride ? " ✎" : ""}
+              </span>
+              <span style={{ background: sourceColor[c.source] + "22", color: sourceColor[c.source], border: "1px solid " + sourceColor[c.source] + "44", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>
+                {sourceLabel[c.source]}
+              </span>
+              {bs.label && <Badge color={c.branch === "win" ? "#4ade80" : "#f87171"}>{bs.label}</Badge>}
+              <span style={{ color: "#cbd5e1", fontSize: 13, flex: 1 }}>{c.teamName}</span>
+              <span style={{ color: "#334155", fontSize: 14 }}>›</span>
+            </button>
+          );
+        })}
+      </div>
 
-        return (
-          <Card key={c.id} style={{ padding: "10px 14px", background: bs.bg, borderColor: bs.border }}>
-            {!isEditing ? (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <span style={{ color: "#f1f5f9", fontWeight: 700 }}>Chukka {c.chukkaNum}</span>
-                <button onClick={() => { setEditingId(c.id); setEditTime(displayTime || ""); }}
-                  style={{ background: "#0f172a", border: "1px solid #334155", borderRadius: 4, color: c.timeOverride ? "#fbbf24" : "#94a3b8", padding: "2px 8px", fontSize: 12, cursor: "pointer" }}>
-                  {displayTime || "set time"}{c.timeOverride ? " ✎" : ""}
-                </button>
-                <span style={{ background: sourceColor[c.source] + "22", color: sourceColor[c.source], border: "1px solid " + sourceColor[c.source] + "44", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 700 }}>
-                  {sourceLabel[c.source]}
-                </span>
-                {bs.label && <Badge color={c.branch === "win" ? "#4ade80" : "#f87171"}>{bs.label}</Badge>}
-                <span style={{ color: "#cbd5e1", fontSize: 13, flex: 1 }}>{c.teamName}</span>
-                {canDelete
-                  ? <Btn small danger onClick={() => deleteChukka(c)}>✕</Btn>
-                  : c.timeOverride && (
-                    <button onClick={() => {
-                      const overrides = { ...(day.timeOverrides || {}) };
-                      delete overrides[c.id.replace("bracket-", "")];
-                      onUpdateDay({ ...day, timeOverrides: overrides });
-                    }} style={{ background: "none", border: "none", color: "#475569", fontSize: 11, cursor: "pointer" }}>reset</button>
-                  )
-                }
+      {/* Chukka detail modal */}
+      {selectedChukka && (
+        <div style={{ position: "fixed", inset: 0, background: "#000000cc", zIndex: 1000, display: "flex", alignItems: "flex-end" }}
+          onClick={() => { setSelectedChukka(null); setConfirmingDelete(false); }}>
+          <div style={{ background: "#0f172a", borderRadius: "16px 16px 0 0", width: "100%", padding: 20 }}
+            onClick={e => e.stopPropagation()}>
+
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <div>
+                <h3 style={{ color: "#f1f5f9", fontSize: 17, margin: 0 }}>Chukka {selectedChukka.chukkaNum} — {selectedChukka.teamName}</h3>
+                <p style={{ color: "#475569", fontSize: 12, margin: "2px 0 0" }}>
+                  {selectedChukka.division} · {selectedChukka.branch !== "confirmed" ? selectedChukka.branch.toUpperCase() + " PATH · " : ""}
+                  <span style={{ color: sourceColor[selectedChukka.source] }}>{sourceLabel[selectedChukka.source]}</span>
+                </p>
               </div>
-            ) : (
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ color: "#f1f5f9", fontWeight: 700, minWidth: 60 }}>Chukka {c.chukkaNum}</span>
-                <input type="time" value={editTime} onChange={e => setEditTime(e.target.value)}
-                  style={{ background: "#0f172a", border: "1px solid #3b82f6", borderRadius: 6, color: "#f1f5f9", padding: "6px 10px", fontSize: 14, outline: "none", flex: 1 }} />
-                <Btn small onClick={() => saveTimeOverride(c)}>Save</Btn>
-                <Btn small variant="secondary" onClick={() => setEditingId(null)}>Cancel</Btn>
+              <button onClick={() => { setSelectedChukka(null); setConfirmingDelete(false); }}
+                style={{ background: "none", border: "none", color: "#475569", fontSize: 24, cursor: "pointer" }}>✕</button>
+            </div>
+
+            {/* Time edit */}
+            <div style={{ marginBottom: 16 }}>
+              <p style={{ color: "#64748b", fontSize: 11, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: 1 }}>Time</p>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input type="time" value={pendingTime} onChange={e => setPendingTime(e.target.value)}
+                  style={{ flex: 1, background: "#1e293b", border: "1px solid #3b82f6", borderRadius: 8, color: "#f1f5f9", padding: "10px 14px", fontSize: 16, outline: "none" }} />
+                {selectedChukka.timeOverride && (
+                  <button onClick={resetTime} style={{ background: "none", border: "1px solid #334155", borderRadius: 6, color: "#64748b", padding: "8px 12px", fontSize: 12, cursor: "pointer" }}>
+                    Reset
+                  </button>
+                )}
+              </div>
+              {pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) && (
+                <div style={{ marginTop: 10, background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 8, padding: 12 }}>
+                  <p style={{ color: "#93c5fd", fontSize: 13, margin: "0 0 10px" }}>
+                    Change time from <strong>{selectedChukka.timeOverride || selectedChukka.time}</strong> to <strong>{pendingTime}</strong>?
+                  </p>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={saveTime} style={{ flex: 1, background: "#1d4ed8", border: "none", borderRadius: 6, color: "#fff", padding: "10px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+                      Confirm change
+                    </button>
+                    <button onClick={() => setPendingTime(selectedChukka.timeOverride || selectedChukka.time || "")}
+                      style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, color: "#94a3b8", padding: "10px 14px", fontSize: 13, cursor: "pointer" }}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Delete — only for manual/excel chukkas */}
+            {(selectedChukka.source === "manual" || selectedChukka.source === "excel") && (
+              <div style={{ borderTop: "1px solid #1e293b", paddingTop: 14 }}>
+                {!confirmingDelete ? (
+                  <button onClick={() => setConfirmingDelete(true)} style={{ width: "100%", background: "#1e293b", border: "1px solid #dc2626", borderRadius: 8, color: "#f87171", padding: "10px 0", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>
+                    Remove this chukka
+                  </button>
+                ) : (
+                  <div style={{ background: "#450a0a", border: "1px solid #dc2626", borderRadius: 8, padding: 12 }}>
+                    <p style={{ color: "#f87171", fontWeight: 700, fontSize: 13, margin: "0 0 10px", textAlign: "center" }}>
+                      Remove chukka {selectedChukka.chukkaNum} ({selectedChukka.teamName})?
+                    </p>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => setConfirmingDelete(false)} style={{ flex: 1, background: "#1e293b", border: "1px solid #334155", borderRadius: 6, color: "#94a3b8", padding: "10px 0", fontSize: 14, cursor: "pointer" }}>Cancel</button>
+                      <button onClick={deleteChukka} style={{ flex: 1, background: "#dc2626", border: "none", borderRadius: 6, color: "#fff", padding: "10px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Yes, remove</button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
-          </Card>
-        );
-      })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
