@@ -1208,73 +1208,87 @@ function AssignmentPicker({ chukka, playerId, playerName, currentHorseId, horses
 // Detects when back-to-back chukkas create genuine horse shortages
 // independent of preference lists — i.e. the schedule itself is the problem
 function analyseSchedulePressure(allChukkas, assignments, horses, conflicts) {
-  if (conflicts.length === 0) return [];
-
   const available = horses.filter(h => h.unavailable !== true);
+  const totalAvailable = available.length;
   const pressureAlerts = [];
 
-  const conflictedChukkaIds = new Set(conflicts.map(c => c.chukkaId));
-  const sorted = [...allChukkas].sort((a, b) => (parseInt(a.chukkaNum) || 0) - (parseInt(b.chukkaNum) || 0));
-
-  // Group all chukkas by chukka number — multiple teams can share a number
+  // Group all chukkas by chukka number
   const byNum = {};
-  for (const c of sorted) {
+  for (const c of allChukkas) {
     const n = parseInt(c.chukkaNum) || 0;
     if (!byNum[n]) byNum[n] = [];
     byNum[n].push(c);
   }
 
-  // For each conflicted chukka, check if adjacent chukka numbers used too many horses
-  const checkedNums = new Set();
-  for (const chukka of sorted) {
-    if (!conflictedChukkaIds.has(chukka.id)) continue;
-    const thisNum = parseInt(chukka.chukkaNum) || 0;
-    if (checkedNums.has(thisNum)) continue;
-    checkedNums.add(thisNum);
+  const nums = Object.keys(byNum).map(Number).sort((a, b) => a - b);
 
-    // Collect ALL chukkas at adjacent numbers (±1) — could be multiple teams
-    const adjacentNums = [thisNum - 1, thisNum + 1].filter(n => byNum[n]);
-    if (adjacentNums.length === 0) continue;
+  // Check each pair of adjacent chukka numbers
+  const checkedPairs = new Set();
+  for (let i = 0; i < nums.length - 1; i++) {
+    const numA = nums[i];
+    const numB = nums[i + 1];
+    if (numB - numA !== 1) continue; // only truly adjacent
+    const pairKey = `${numA}-${numB}`;
+    if (checkedPairs.has(pairKey)) continue;
+    checkedPairs.add(pairKey);
 
-    const adjacentChukkas = adjacentNums.flatMap(n => byNum[n]);
+    const chukkaA = byNum[numA] || [];
+    const chukkaB = byNum[numB] || [];
 
-    // All horses used across all adjacent chukkas are on rest
-    const horsesOnRest = new Set();
-    for (const adj of adjacentChukkas) {
-      for (const playerId of (adj.playerIds || [])) {
-        const a = assignments[adj.id]?.[playerId];
-        if (a?.horseId) horsesOnRest.add(a.horseId);
+    // Total players across both chukkas
+    const playersA = chukkaA.reduce((n, c) => n + (c.playerIds || []).length, 0);
+    const playersB = chukkaB.reduce((n, c) => n + (c.playerIds || []).length, 0);
+    const totalDemand = playersA + playersB;
+
+    // Since all horses used in A need rest before B, 
+    // effective capacity for B = total available - horses used in A
+    const horsesUsedInA = new Set();
+    for (const c of chukkaA) {
+      for (const pid of (c.playerIds || [])) {
+        const a = assignments[c.id]?.[pid];
+        if (a?.horseId) horsesUsedInA.add(a.horseId);
       }
     }
+    const effectiveForB = totalAvailable - horsesUsedInA.size;
 
-    if (horsesOnRest.size === 0) continue;
+    // Flag if: total demand across both exceeds supply, OR B can't be covered
+    const teamsA = chukkaA.map(c => {
+      const tid = c.teamId;
+      const team = allChukkas.find(x => x.teamId === tid);
+      return c.teamId;
+    });
 
-    // How many players at THIS chukka number still need a horse
-    const allAtThisNum = byNum[thisNum] || [];
-    const horsesNeeded = allAtThisNum.reduce((n, c) => {
-      return n + (c.playerIds || []).filter(pid => !assignments[c.id]?.[pid]?.horseId).length;
-    }, 0);
-
-    const horsesAvailable = available.filter(h => !horsesOnRest.has(h.id)).length;
-
-    if (horsesAvailable < horsesNeeded) {
-      // Build description of which adjacent chukkas caused pressure
-      const adjDesc = adjacentNums.map(n => {
-        const teams = byNum[n].map(c => {
-          const team = allChukkas.find(x => x.id === c.id);
-          return `chukka ${n}`;
-        });
-        return `chukka ${n} (${byNum[n].length} team${byNum[n].length > 1 ? "s" : ""})`;
-      }).join(" and ");
-
+    if (totalDemand > totalAvailable) {
+      const teamsANames = [...new Set(chukkaA.map(c => c.teamId))];
+      const teamsBNames = [...new Set(chukkaB.map(c => c.teamId))];
       pressureAlerts.push({
-        chukkaNum: String(thisNum),
-        horsesOnRest: horsesOnRest.size,
-        horsesAvailable,
-        horsesNeeded,
-        adjacentDesc: adjDesc,
-        shortfall: horsesNeeded - horsesAvailable,
-        multipleTeamsAdjacent: adjacentChukkas.length > adjacentNums.length,
+        type: "combined",
+        chukkaA: numA,
+        chukkaB: numB,
+        teamsInA: chukkaA.length,
+        teamsInB: chukkaB.length,
+        playersA,
+        playersB,
+        totalDemand,
+        totalAvailable,
+        shortfall: totalDemand - totalAvailable,
+        effectiveForB,
+        needForB: playersB,
+      });
+    } else if (effectiveForB < playersB) {
+      pressureAlerts.push({
+        type: "rest",
+        chukkaA: numA,
+        chukkaB: numB,
+        teamsInA: chukkaA.length,
+        teamsInB: chukkaB.length,
+        playersA,
+        playersB,
+        horsesOnRest: horsesUsedInA.size,
+        effectiveForB,
+        needForB: playersB,
+        shortfall: playersB - effectiveForB,
+        totalAvailable,
       });
     }
   }
@@ -1300,17 +1314,30 @@ function ConflictPanel({ conflicts, horses, allChukkas, assignments }) {
         {/* Schedule pressure alerts — shown first as root cause */}
         {pressureAlerts.map((alert, i) => (
           <div key={i} style={{ background: "#422006", border: "1px solid #d97706", borderRadius: 6, padding: 10 }}>
-            <p style={{ color: "#fbbf24", fontWeight: 700, fontSize: 13, margin: "0 0 4px" }}>
-              📅 Schedule pressure — Chukka {alert.chukkaNum}
+            <p style={{ color: "#fbbf24", fontWeight: 700, fontSize: 13, margin: "0 0 6px" }}>
+              📅 Schedule pressure — Chukkas {alert.chukkaA} and {alert.chukkaB}
             </p>
-            <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 2px" }}>
-              {alert.adjacentDesc} ran immediately before/after — {alert.horsesOnRest} horse{alert.horsesOnRest !== 1 ? "s" : ""} on mandatory rest.
-            </p>
-            <p style={{ color: "#fbbf24", fontSize: 12, margin: "0 0 2px" }}>
-              {alert.horsesAvailable} horse{alert.horsesAvailable !== 1 ? "s" : ""} available, {alert.horsesNeeded} needed — shortfall of {alert.shortfall}.
-            </p>
+            {alert.type === "combined" ? (
+              <>
+                <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 2px" }}>
+                  Chukka {alert.chukkaA} needs {alert.playersA} horse{alert.playersA !== 1 ? "s" : ""} ({alert.teamsInA} team{alert.teamsInA !== 1 ? "s" : ""}) and chukka {alert.chukkaB} needs {alert.playersB} — total demand is {alert.totalDemand} but only {alert.totalAvailable} horses available.
+                </p>
+                <p style={{ color: "#fbbf24", fontSize: 12, margin: "0 0 4px", fontWeight: 600 }}>
+                  Shortfall of {alert.shortfall} — this pair of chukkas cannot both be fully covered.
+                </p>
+              </>
+            ) : (
+              <>
+                <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 2px" }}>
+                  Chukka {alert.chukkaA} uses {alert.horsesOnRest} horse{alert.horsesOnRest !== 1 ? "s" : ""} ({alert.teamsInA} team{alert.teamsInA !== 1 ? "s" : ""}) — all need rest before chukka {alert.chukkaB}.
+                </p>
+                <p style={{ color: "#fbbf24", fontSize: 12, margin: "0 0 4px", fontWeight: 600 }}>
+                  Only {alert.effectiveForB} of {alert.totalAvailable} horses available for chukka {alert.chukkaB} — needs {alert.needForB}, shortfall of {alert.shortfall}.
+                </p>
+              </>
+            )}
             <p style={{ color: "#64748b", fontSize: 11, margin: "4px 0 0" }}>
-              Fix: move chukka {alert.chukkaNum} further in the schedule, authorise a 5th chukka, or mark a horse available.
+              Fix: move chukkas {alert.chukkaA} and {alert.chukkaB} further apart, authorise a 5th chukka, or mark an additional horse available.
             </p>
           </div>
         ))}
@@ -1389,7 +1416,8 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
   const allConroyChukkas = [...bracketChukkas.map(c => {
     const overrideKey = `${c.chukkaNum}-${c.pitch}-${c.conroyTeam?.id}-${c.branch}`;
     const timeOverride = (day.timeOverrides || {})[overrideKey];
-    return timeOverride ? { ...c, time: timeOverride } : c;
+    const numOverride = (day.chukkaNumOverrides || {})[overrideKey];
+    return (timeOverride || numOverride) ? { ...c, time: timeOverride || c.time, chukkaNum: numOverride || c.chukkaNum } : c;
   })];
   for (const mc of manualChukkas) {
     const isDup = allConroyChukkas.some(c => c.chukkaNum === mc.chukkaNum && c.conroyTeam?.id === mc.teamId && c.branch === mc.branch);
@@ -2126,6 +2154,7 @@ function ScheduleTab({ day, event, onUpdateDay }) {
 function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
   const [selectedChukka, setSelectedChukka] = useState(null);
   const [pendingTime, setPendingTime] = useState("");
+  const [pendingNum, setPendingNum] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const sorted = [...chukkas].sort((a, b) => (parseInt(a.chukkaNum) || 0) - (parseInt(b.chukkaNum) || 0));
@@ -2133,25 +2162,41 @@ function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
   function openChukka(c) {
     setSelectedChukka(c);
     setPendingTime(c.timeOverride || c.time || "");
+    setPendingNum(c.chukkaNum || "");
     setConfirmingDelete(false);
   }
 
-  function saveTime() {
-    if (!selectedChukka || !pendingTime) return;
+  function saveChanges() {
+    if (!selectedChukka) return;
+    const timeChanged = pendingTime !== (selectedChukka.timeOverride || selectedChukka.time);
+    const numChanged = pendingNum !== selectedChukka.chukkaNum;
+    if (!timeChanged && !numChanged) return;
+
     if (selectedChukka.source === "manual" || selectedChukka.source === "excel") {
-      onUpdateDay({ ...day, schedule: schedule.map(c => c.id === selectedChukka.id ? { ...c, time: pendingTime } : c) });
+      onUpdateDay({ ...day, schedule: schedule.map(c => c.id === selectedChukka.id ? {
+        ...c,
+        time: timeChanged ? pendingTime : c.time,
+        chukkaNum: numChanged ? pendingNum : c.chukkaNum,
+      } : c) });
     } else {
-      const key = selectedChukka.id.replace("bracket-", "");
-      onUpdateDay({ ...day, timeOverrides: { ...(day.timeOverrides || {}), [key]: pendingTime } });
+      // Bracket chukkas — store overrides
+      const timeKey = selectedChukka.id.replace("bracket-", "");
+      const overrides = { ...(day.timeOverrides || {}) };
+      const numOverrides = { ...(day.chukkaNumOverrides || {}) };
+      if (timeChanged) overrides[timeKey] = pendingTime;
+      if (numChanged) numOverrides[timeKey] = pendingNum;
+      onUpdateDay({ ...day, timeOverrides: overrides, chukkaNumOverrides: numOverrides });
     }
     setSelectedChukka(null);
   }
 
-  function resetTime() {
+  function resetOverrides() {
     const key = selectedChukka.id.replace("bracket-", "");
     const overrides = { ...(day.timeOverrides || {}) };
+    const numOverrides = { ...(day.chukkaNumOverrides || {}) };
     delete overrides[key];
-    onUpdateDay({ ...day, timeOverrides: overrides });
+    delete numOverrides[key];
+    onUpdateDay({ ...day, timeOverrides: overrides, chukkaNumOverrides: numOverrides });
     setSelectedChukka(null);
   }
 
@@ -2216,35 +2261,50 @@ function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
                 style={{ background: "none", border: "none", color: "#475569", fontSize: 24, cursor: "pointer" }}>✕</button>
             </div>
 
-            {/* Time edit */}
-            <div style={{ marginBottom: 16 }}>
-              <p style={{ color: "#64748b", fontSize: 11, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: 1 }}>Time</p>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input type="time" value={pendingTime} onChange={e => setPendingTime(e.target.value)}
-                  style={{ flex: 1, background: "#1e293b", border: "1px solid #3b82f6", borderRadius: 8, color: "#f1f5f9", padding: "10px 14px", fontSize: 16, outline: "none" }} />
-                {selectedChukka.timeOverride && (
-                  <button onClick={resetTime} style={{ background: "none", border: "1px solid #334155", borderRadius: 6, color: "#64748b", padding: "8px 12px", fontSize: 12, cursor: "pointer" }}>
-                    Reset
-                  </button>
-                )}
+            {/* Chukka number + time edit */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+              <div style={{ flex: 1 }}>
+                <p style={{ color: "#64748b", fontSize: 11, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: 1 }}>Chukka #</p>
+                <input type="text" value={pendingNum} onChange={e => setPendingNum(e.target.value)}
+                  style={{ width: "100%", boxSizing: "border-box", background: "#1e293b", border: "1px solid " + (pendingNum !== selectedChukka.chukkaNum ? "#fbbf24" : "#334155"), borderRadius: 8, color: "#f1f5f9", padding: "10px 14px", fontSize: 16, outline: "none" }} />
               </div>
-              {pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) && (
-                <div style={{ marginTop: 10, background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 8, padding: 12 }}>
-                  <p style={{ color: "#93c5fd", fontSize: 13, margin: "0 0 10px" }}>
-                    Change time from <strong>{selectedChukka.timeOverride || selectedChukka.time}</strong> to <strong>{pendingTime}</strong>?
-                  </p>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={saveTime} style={{ flex: 1, background: "#1d4ed8", border: "none", borderRadius: 6, color: "#fff", padding: "10px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-                      Confirm change
-                    </button>
-                    <button onClick={() => setPendingTime(selectedChukka.timeOverride || selectedChukka.time || "")}
-                      style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, color: "#94a3b8", padding: "10px 14px", fontSize: 13, cursor: "pointer" }}>
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
+              <div style={{ flex: 2 }}>
+                <p style={{ color: "#64748b", fontSize: 11, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: 1 }}>Time</p>
+                <input type="time" value={pendingTime} onChange={e => setPendingTime(e.target.value)}
+                  style={{ width: "100%", boxSizing: "border-box", background: "#1e293b", border: "1px solid " + (pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) ? "#3b82f6" : "#334155"), borderRadius: 8, color: "#f1f5f9", padding: "10px 14px", fontSize: 16, outline: "none" }} />
+              </div>
             </div>
+
+            {/* Confirm changes if anything modified */}
+            {(pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) || pendingNum !== selectedChukka.chukkaNum) && (
+              <div style={{ marginBottom: 12, background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 8, padding: 12 }}>
+                <p style={{ color: "#93c5fd", fontSize: 13, margin: "0 0 10px", fontWeight: 600 }}>Confirm changes:</p>
+                {pendingNum !== selectedChukka.chukkaNum && (
+                  <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 4px" }}>Chukka # <strong style={{ color: "#f1f5f9" }}>{selectedChukka.chukkaNum}</strong> → <strong style={{ color: "#fbbf24" }}>{pendingNum}</strong></p>
+                )}
+                {pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) && (
+                  <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 10px" }}>Time <strong style={{ color: "#f1f5f9" }}>{selectedChukka.timeOverride || selectedChukka.time}</strong> → <strong style={{ color: "#93c5fd" }}>{pendingTime}</strong></p>
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={saveChanges} style={{ flex: 1, background: "#1d4ed8", border: "none", borderRadius: 6, color: "#fff", padding: "10px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+                    Confirm
+                  </button>
+                  <button onClick={() => { setPendingTime(selectedChukka.timeOverride || selectedChukka.time || ""); setPendingNum(selectedChukka.chukkaNum || ""); }}
+                    style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, color: "#94a3b8", padding: "10px 14px", fontSize: 13, cursor: "pointer" }}>
+                    Revert
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Reset overrides for bracket chukkas */}
+            {selectedChukka.source === "bracket" && (selectedChukka.timeOverride || (day.chukkaNumOverrides || {})[selectedChukka.id.replace("bracket-", "")]) && (
+              <div style={{ marginBottom: 12 }}>
+                <button onClick={resetOverrides} style={{ background: "none", border: "1px solid #334155", borderRadius: 6, color: "#64748b", padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>
+                  Reset to original schedule values
+                </button>
+              </div>
+            )}
 
             {/* Delete — only for manual/excel chukkas */}
             {(selectedChukka.source === "manual" || selectedChukka.source === "excel") && (
