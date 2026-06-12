@@ -1261,11 +1261,18 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
   const [searchName, setSearchName] = useState("");
   const [showSaved, setShowSaved] = useState(false);
 
-  // Solution history — array of { assignments, conflicts, savedAt? }
-  // Current position in history
+  // Solution history — ephemeral browsing, resets on navigation (that's fine)
   const [history, setHistory] = useState([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
-  const [savedSolutions, setSavedSolutions] = useState([]); // array of { assignments, conflicts, label }
+  const [completeOnly, setCompleteOnly] = useState(false);
+  const [searching, setSearching] = useState(false);
+
+  // Saved solutions — persisted in day object so they survive navigation
+  const savedSolutions = day.savedSolutions || [];
+  function setSavedSolutions(updater) {
+    const next = typeof updater === "function" ? updater(savedSolutions) : updater;
+    onUpdateDay({ ...day, savedSolutions: next });
+  }
 
   const teamWins = getTeamWins(teams, allDayResults);
   const locks = day.locks || {};
@@ -1285,11 +1292,38 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
   const allocatable = bracketToAllocatable(allConroyChukkas);
 
   // Generate a new solution and add to history
+  // If completeOnly is on, keep trying until conflict-free or 100 attempts
   function generateSolution() {
-    const result = runAllocation(allocatable, teams, horses, welfareRules, teamWins, locks, Date.now());
-    const newHistory = [...history.slice(0, historyIdx + 1), result];
-    setHistory(newHistory);
-    setHistoryIdx(newHistory.length - 1);
+    if (completeOnly) {
+      setSearching(true);
+      let attempts = 0;
+      let found = null;
+      while (attempts < 100) {
+        const result = runAllocation(allocatable, teams, horses, welfareRules, teamWins, locks, Date.now() + attempts);
+        if (result.conflicts.length === 0) { found = result; break; }
+        attempts++;
+      }
+      setSearching(false);
+      if (found) {
+        const newHistory = [...history.slice(0, historyIdx + 1), found];
+        setHistory(newHistory);
+        setHistoryIdx(newHistory.length - 1);
+      } else {
+        // No complete solution found — add best attempt (fewest conflicts)
+        const best = Array.from({ length: 10 }, (_, i) =>
+          runAllocation(allocatable, teams, horses, welfareRules, teamWins, locks, Date.now() + i + 200)
+        ).sort((a, b) => a.conflicts.length - b.conflicts.length)[0];
+        const newHistory = [...history.slice(0, historyIdx + 1), best];
+        setHistory(newHistory);
+        setHistoryIdx(newHistory.length - 1);
+        alert(`No complete solution found in 100 attempts. Showing best result with ${best.conflicts.length} conflict${best.conflicts.length !== 1 ? "s" : ""}. Try authorising a 5th chukka or adjusting preferences.`);
+      }
+    } else {
+      const result = runAllocation(allocatable, teams, horses, welfareRules, teamWins, locks, Date.now());
+      const newHistory = [...history.slice(0, historyIdx + 1), result];
+      setHistory(newHistory);
+      setHistoryIdx(newHistory.length - 1);
+    }
   }
 
   // Initialise with first solution if history is empty
@@ -1398,9 +1432,21 @@ function DayViewTab({ day, event, allDayResults, onUpdateDay }) {
               : <span style={{ color: "#f87171", marginLeft: 6 }}>⚠ {conflicts.length} conflict{conflicts.length !== 1 ? "s" : ""}</span>
             }
           </span>
-          <button onClick={generateSolution}
-            style={{ background: "#1e293b", border: "1px solid #3b82f6", borderRadius: 6, color: "#93c5fd", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-            Next →
+          <button onClick={generateSolution} disabled={searching}
+            style={{ background: searching ? "#1e293b" : "#1e293b", border: "1px solid #3b82f6", borderRadius: 6, color: searching ? "#475569" : "#93c5fd", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: searching ? "not-allowed" : "pointer" }}>
+            {searching ? "..." : "Next →"}
+          </button>
+        </div>
+        {/* Complete only toggle */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <button onClick={() => setCompleteOnly(v => !v)} style={{
+            background: completeOnly ? "#14532d" : "#1e293b",
+            border: "1px solid " + (completeOnly ? "#16a34a" : "#334155"),
+            borderRadius: 6, color: completeOnly ? "#4ade80" : "#64748b",
+            padding: "4px 10px", fontSize: 11, fontWeight: 700,
+            cursor: "pointer", letterSpacing: 1, textTransform: "uppercase",
+          }}>
+            {completeOnly ? "✓ Complete solutions only" : "Complete solutions only"}
           </button>
         </div>
 
