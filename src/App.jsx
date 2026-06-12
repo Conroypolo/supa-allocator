@@ -2118,17 +2118,23 @@ function ScheduleTab({ day, event, onUpdateDay }) {
         const bracketCh = SUMMER_2026_RAW[day.name]
           ? findConroyChukkas(day.name, teams, day.results || {})
           : [];
-        const allTracked = [...bracketCh.map(c => ({
-          id: `bracket-${c.chukkaNum}-${c.pitch}-${c.conroyTeam?.id}-${c.branch}`,
-          chukkaNum: c.chukkaNum,
-          time: c.time,
-          division: c.division,
-          teamId: c.conroyTeam?.id,
-          teamName: c.conroyTeam?.name,
-          branch: c.branch,
-          source: "bracket",
-          timeOverride: (day.timeOverrides || {})[`${c.chukkaNum}-${c.pitch}-${c.conroyTeam?.id}-${c.branch}`],
-        })), ...sorted.map(c => ({
+        const allTracked = [...bracketCh.map(c => {
+          const overrideKey = `${c.chukkaNum}-${c.pitch}-${c.conroyTeam?.id}-${c.branch}`;
+          const timeOverride = (day.timeOverrides || {})[overrideKey] || null;
+          const numOverride = (day.chukkaNumOverrides || {})[overrideKey] || null;
+          return ({
+            id: `bracket-${c.chukkaNum}-${c.pitch}-${c.conroyTeam?.id}-${c.branch}`,
+            chukkaNum: numOverride || c.chukkaNum,
+            time: timeOverride || c.time,
+            division: c.division,
+            teamId: c.conroyTeam?.id,
+            teamName: c.conroyTeam?.name,
+            branch: c.branch,
+            source: "bracket",
+            timeOverride,
+            chukkaNumOverride: numOverride,
+          });
+        }), ...sorted.map(c => ({
           ...c,
           teamName: teams.find(t => t.id === c.teamId)?.name,
           source: c.fromExcel ? "excel" : "manual",
@@ -2162,14 +2168,14 @@ function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
   function openChukka(c) {
     setSelectedChukka(c);
     setPendingTime(c.timeOverride || c.time || "");
-    setPendingNum(c.chukkaNum || "");
+    setPendingNum(c.chukkaNumOverride || c.chukkaNum || "");
     setConfirmingDelete(false);
   }
 
   function saveChanges() {
     if (!selectedChukka) return;
     const timeChanged = pendingTime !== (selectedChukka.timeOverride || selectedChukka.time);
-    const numChanged = pendingNum !== selectedChukka.chukkaNum;
+    const numChanged = pendingNum !== (selectedChukka.chukkaNumOverride || selectedChukka.chukkaNum);
     if (!timeChanged && !numChanged) return;
 
     if (selectedChukka.source === "manual" || selectedChukka.source === "excel") {
@@ -2291,11 +2297,11 @@ function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
             </div>
 
             {/* Confirm changes if anything modified */}
-            {(pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) || pendingNum !== selectedChukka.chukkaNum) && (
+            {(pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) || pendingNum !== (selectedChukka.chukkaNumOverride || selectedChukka.chukkaNum)) && (
               <div style={{ marginBottom: 12, background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 8, padding: 12 }}>
                 <p style={{ color: "#93c5fd", fontSize: 13, margin: "0 0 10px", fontWeight: 600 }}>Confirm changes:</p>
-                {pendingNum !== selectedChukka.chukkaNum && (
-                  <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 4px" }}>Chukka # <strong style={{ color: "#f1f5f9" }}>{selectedChukka.chukkaNum}</strong> → <strong style={{ color: "#fbbf24" }}>{pendingNum}</strong></p>
+                {pendingNum !== (selectedChukka.chukkaNumOverride || selectedChukka.chukkaNum) && (
+                  <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 4px" }}>Chukka # <strong style={{ color: "#f1f5f9" }}>{selectedChukka.chukkaNumOverride || selectedChukka.chukkaNum}</strong> → <strong style={{ color: "#fbbf24" }}>{pendingNum}</strong></p>
                 )}
                 {pendingTime !== (selectedChukka.timeOverride || selectedChukka.time) && (
                   <p style={{ color: "#94a3b8", fontSize: 12, margin: "0 0 10px" }}>Time <strong style={{ color: "#f1f5f9" }}>{selectedChukka.timeOverride || selectedChukka.time}</strong> → <strong style={{ color: "#93c5fd" }}>{pendingTime}</strong></p>
@@ -2304,7 +2310,7 @@ function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
                   <button onClick={saveChanges} style={{ flex: 1, background: "#1d4ed8", border: "none", borderRadius: 6, color: "#fff", padding: "10px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
                     Confirm
                   </button>
-                  <button onClick={() => { setPendingTime(selectedChukka.timeOverride || selectedChukka.time || ""); setPendingNum(selectedChukka.chukkaNum || ""); }}
+                  <button onClick={() => { setPendingTime(selectedChukka.timeOverride || selectedChukka.time || ""); setPendingNum(selectedChukka.chukkaNumOverride || selectedChukka.chukkaNum || ""); }}
                     style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, color: "#94a3b8", padding: "10px 14px", fontSize: 13, cursor: "pointer" }}>
                     Revert
                   </button>
