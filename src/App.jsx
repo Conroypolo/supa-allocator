@@ -2179,23 +2179,38 @@ function AllChukkaList({ chukkas, teams, day, onUpdateDay, schedule }) {
         chukkaNum: numChanged ? pendingNum : c.chukkaNum,
       } : c) });
     } else {
-      // Bracket chukkas — store overrides
-      const timeKey = selectedChukka.id.replace("bracket-", "");
+      // Bracket chukkas — apply overrides to ALL entries sharing this chukka number
+      // (multiple teams can share a chukka number e.g. chukka 33 = 2 teams)
       const overrides = { ...(day.timeOverrides || {}) };
       const numOverrides = { ...(day.chukkaNumOverrides || {}) };
-      if (timeChanged) overrides[timeKey] = pendingTime;
-      if (numChanged) numOverrides[timeKey] = pendingNum;
+
+      // Find all bracket chukkas with the same chukka number
+      const sameNum = sorted.filter(c =>
+        c.source === "bracket" && c.chukkaNum === selectedChukka.chukkaNum
+      );
+
+      for (const c of sameNum) {
+        const key = c.id.replace("bracket-", "");
+        if (timeChanged) overrides[key] = pendingTime;
+        if (numChanged) numOverrides[key] = pendingNum;
+      }
+
       onUpdateDay({ ...day, timeOverrides: overrides, chukkaNumOverrides: numOverrides });
     }
     setSelectedChukka(null);
   }
 
   function resetOverrides() {
-    const key = selectedChukka.id.replace("bracket-", "");
     const overrides = { ...(day.timeOverrides || {}) };
     const numOverrides = { ...(day.chukkaNumOverrides || {}) };
-    delete overrides[key];
-    delete numOverrides[key];
+    const sameNum = sorted.filter(c =>
+      c.source === "bracket" && c.chukkaNum === selectedChukka.chukkaNum
+    );
+    for (const c of sameNum) {
+      const key = c.id.replace("bracket-", "");
+      delete overrides[key];
+      delete numOverrides[key];
+    }
     onUpdateDay({ ...day, timeOverrides: overrides, chukkaNumOverrides: numOverrides });
     setSelectedChukka(null);
   }
